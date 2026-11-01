@@ -36,7 +36,8 @@ def index():
 def state():
     since = int(request.args.get("since", 0))
     return jsonify({"products": core.list_products(), "status": scheduler.state,
-                    "alerts": core.alerts_since(since)})
+                    "alerts": core.alerts_since(since),
+                    "source": "keepa" if core.using_keepa() else "web"})
 
 
 @app.post("/api/products")
@@ -93,6 +94,17 @@ def test_telegram():
     except Exception as e:
         return err(str(e))
     return jsonify({"ok": True})
+
+
+@app.post("/api/settings/test-keepa")
+def test_keepa():
+    key = (request.get_json(silent=True) or {}).get("keepa_key") or core.get_settings().get("keepa_key")
+    if not key:
+        return err("Pega primero tu clave de Keepa.")
+    try:
+        return jsonify(core.keepa.tokens(key.strip()))
+    except core.keepa.KeepaError as e:
+        return err(str(e))
 
 
 def free_port(preferred=5173):

@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+import keepa
+
 DB_PATH = Path(os.environ.get("CAZAPRECIOS_DB", Path(__file__).with_name("cazaprecios.db")))
 
 USER_AGENTS = [
@@ -36,7 +38,7 @@ PRICE_SELECTORS = [
 
 ASIN_RE = re.compile(r"/(?:dp|gp/product|gp/aw/d|product)/([A-Z0-9]{10})", re.I)
 
-DEFAULT_SETTINGS = {"interval_hours": "6", "telegram_token": "", "telegram_chat_id": ""}
+DEFAULT_SETTINGS = {"interval_hours": "6", "telegram_token": "", "telegram_chat_id": "", "keepa_key": ""}
 
 
 class ScrapeError(Exception):
@@ -154,6 +156,22 @@ def fetch_product(url: str, retries: int = 3) -> Product:
     raise last_err or ScrapeError("Error desconocido")
 
 
+def using_keepa() -> bool:
+    return bool(get_settings().get("keepa_key"))
+
+
+def fetch(url: str, with_history: bool = False) -> tuple[Product, list]:
+    """Lee el producto con Keepa si hay clave configurada; si no, de la web de Amazon."""
+    key = get_settings().get("keepa_key")
+    if not key:
+        return fetch_product(url), []
+    try:
+        k = keepa.fetch(url, extract_asin(url), key, history=with_history)
+    except keepa.KeepaError as e:
+        raise ScrapeError(str(e))
+    return Product(k["title"], k["price"], k["currency"], k["image"]), k["history"]
+
+
 # ------------------------------------------------------------------ base de datos
 
 def now() -> str:
@@ -237,8 +255,9 @@ def fmt(price, cur) -> str:
 def add_product(url: str, target: float | None) -> dict:
     url = canonical_url(url)
     asin = extract_asin(url)
-    p = fetch_product(url)
+    p, past = fetch(url, with_history=True)
     with db() as conn:
+        is_new = conn.execute("SELECT 1 FROM prices WHERE asin = ? LIMIT 1", (asin,)).fetchone() is None
         conn.execute(
             """INSERT INTO products (asin, url, title, image, target_price, currency, added_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -246,6 +265,9 @@ def add_product(url: str, target: float | None) -> dict:
                    title = excluded.title, image = excluded.image""",
             (asin, url, p.title, p.image, target, p.currency, now()),
         )
+        if is_new:  # historial que ya conoce Keepa
+            conn.executemany("INSERT INTO prices (asin, price, checked_at) VALUES (?, ?, ?)",
+                             [(asin, v, t.isoformat(timespec="seconds")) for t, v in past])
         conn.execute("INSERT INTO prices (asin, price, checked_at) VALUES (?, ?, ?)", (asin, p.price, now()))
     return get_product(asin)
 
@@ -256,7 +278,7 @@ def check_product(conn, row) -> None:
                         "ORDER BY id DESC LIMIT 1", (asin,)).fetchone()
     lowest = conn.execute("SELECT MIN(price) m FROM prices WHERE asin = ?", (asin,)).fetchone()["m"]
     try:
-        p = fetch_product(row["url"])
+        p, _ = fetch(row["url"])
     except ScrapeError as e:
         conn.execute("UPDATE products SET last_error = ? WHERE asin = ?", (str(e), asin))
         return
@@ -279,6 +301,7 @@ def check_product(conn, row) -> None:
 
 
 def check_all(progress=None) -> None:
+    pause = not using_keepa()  # con Keepa no hace falta esperar entre productos
     with db() as conn:
         rows = conn.execute("SELECT * FROM products ORDER BY added_at").fetchall()
         for i, row in enumerate(rows):
@@ -286,7 +309,7 @@ def check_all(progress=None) -> None:
                 progress(i, len(rows), row["asin"])
             check_product(conn, row)
             conn.commit()
-            if i < len(rows) - 1:
+            if pause and i < len(rows) - 1:
                 time.sleep(random.uniform(3, 8))  # ser amable con Amazon
 
 

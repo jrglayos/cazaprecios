@@ -57,3 +57,69 @@ def test_api_flow(monkeypatch):
     assert c.post("/api/settings", json={"interval_hours": "12"}).json["interval_hours"] == "12"
     assert c.delete("/api/products/B0ABCDEF12").json["ok"]
     assert c.get("/api/state").json["products"] == []
+
+
+# ------------------------------------------------------------------ Keepa
+import keepa
+from datetime import datetime, timedelta
+
+
+def kt(dt):  # fecha -> minutos Keepa
+    return int(dt.timestamp() // 60) - 21564000
+
+
+class FakeResp:
+    def __init__(self, status, data):
+        self.status_code, self._data, self.ok = status, data, 200 <= status < 300
+
+    def json(self):
+        return self._data
+
+
+def keepa_product(price_cents=1999, amazon=True):
+    d = datetime.now()
+    hist = [kt(d - timedelta(days=500)), 5000, kt(d - timedelta(days=20)), 2999,
+            kt(d - timedelta(days=10)), -1, kt(d - timedelta(days=5)), 2499]
+    current = [price_cents if amazon else -1, 1899]
+    return {"title": "Auriculares Keepa", "imagesCSV": "abc.jpg,def.jpg",
+            "stats": {"current": current}, "csv": [hist, hist]}
+
+
+def test_keepa_parse():
+    k = keepa.parse_product(keepa_product(), "€")
+    assert (k["title"], k["price"], k["image"]) == ("Auriculares Keepa", 19.99, "https://m.media-amazon.com/images/I/abc.jpg")
+    assert [v for _, v in k["history"]] == [29.99, 24.99]  # sin lo de hace >1 año ni el agotado (-1)
+    assert keepa.parse_product(keepa_product(amazon=False), "€")["price"] == 18.99  # cae al precio "nuevo"
+    assert keepa.domain_for("https://www.amazon.es/dp/X") == (9, "€")
+    with pytest.raises(keepa.KeepaError):
+        keepa.domain_for("https://www.amazon.nl/dp/X")
+
+
+def test_keepa_errors(monkeypatch):
+    monkeypatch.setattr(keepa.requests, "get", lambda *a, **k: FakeResp(429, {}))
+    with pytest.raises(keepa.KeepaError, match="tokens"):
+        keepa.fetch("https://www.amazon.es/dp/B0ABCDEF12", "B0ABCDEF12", "k")
+    monkeypatch.setattr(keepa.requests, "get", lambda *a, **k: FakeResp(200, {"error": {"type": "invalidKey"}}))
+    with pytest.raises(keepa.KeepaError, match="no es válida"):
+        keepa.tokens("k")
+
+
+def test_add_with_keepa_imports_history(monkeypatch):
+    calls = []
+
+    def fake_get(url, params, timeout):
+        calls.append(params)
+        return FakeResp(200, {"products": [keepa_product()]})
+
+    monkeypatch.setattr(keepa.requests, "get", fake_get)
+    core.save_settings({"keepa_key": "secreta"})
+    c = server.app.test_client()
+    p = c.post("/api/products", json={"url": "https://www.amazon.es/dp/B0ABCDEF12", "target": "20"}).json
+    assert calls[0]["domain"] == 9 and calls[0]["history"] == 1
+    assert (p["current"], p["high"], p["low"]) == (19.99, 29.99, 19.99)
+    assert len(c.get("/api/products/B0ABCDEF12/history").json) == 3
+    assert c.get("/api/state").json["source"] == "keepa"
+
+    core.check_all()  # las rondas no piden historial
+    assert calls[-1]["history"] == 0
+    assert len(core.history("B0ABCDEF12")) == 4

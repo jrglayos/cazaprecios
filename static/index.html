@@ -172,6 +172,7 @@ form.hunt{background:var(--bg2);border:1px solid var(--line2);border-radius:26px
 .seg button.on{background:var(--acid);color:var(--acid-ink);border-color:var(--ink);font-weight:800}
 .modal h3{font-size:13px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink2);margin:8px 0 10px}
 .help{font-size:13px;color:var(--muted);line-height:1.55;margin:4px 0 18px}
+.help a{color:var(--ink);font-weight:600}
 .help code{font-family:var(--mono);color:var(--ink2);background:var(--bg2);padding:1px 6px;border-radius:6px}
 .m-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
 
@@ -225,7 +226,7 @@ footer .mono{font-family:var(--mono)}
 <main class="wrap">
   <section class="hero">
     <div>
-      <div class="eyebrow"><i></i>Vigilando Amazon · <span id="nextTxt">en marcha</span></div>
+      <div class="eyebrow"><i></i>Vigilando vía <span id="srcTxt">Amazon</span> · <span id="nextTxt">en marcha</span></div>
       <h1>Tú pones<br><span class="out">el precio.</span><br><em>Amazon obedece.</em></h1>
     </div>
     <div>
@@ -271,6 +272,10 @@ footer .mono{font-family:var(--mono)}
   <div class="seg" id="intervalSeg">
     <button data-h="1">1 h</button><button data-h="3">3 h</button><button data-h="6">6 h</button><button data-h="12">12 h</button><button data-h="24">24 h</button>
   </div>
+  <h3>Fuente de precios · Keepa</h3>
+  <p class="help">Amazon bloquea a menudo la lectura directa de su web. Con una clave de la API de <a href="https://keepa.com/#!api" target="_blank" rel="noopener">Keepa</a> (de pago) los precios llegan siempre y, al añadir un producto, se importa su historial del último año. Déjalo vacío para leer la web de Amazon.</p>
+  <div class="field"><label for="kpKey">Clave de la API de Keepa</label><input id="kpKey" placeholder="Pega aquí tu clave" autocomplete="off" spellcheck="false"></div>
+  <div class="m-actions" style="margin:0 0 22px;justify-content:flex-start"><button class="btn" id="kpTest">Probar clave</button><span class="help" id="kpInfo" style="margin:0;align-self:center"></span></div>
   <h3>Avisos en el móvil (Telegram)</h3>
   <p class="help">1. En Telegram habla con <code>@BotFather</code>, envía <code>/newbot</code> y copia el token.<br>2. Escribe cualquier cosa a tu bot nuevo y luego habla con <code>@userinfobot</code> para saber tu ID.</p>
   <div class="field"><label for="tgToken">Token del bot</label><input id="tgToken" placeholder="123456:ABC-DEF…"></div>
@@ -287,7 +292,7 @@ footer .mono{font-family:var(--mono)}
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-let products = [], status = {}, filter = "all", lastAlert = null, openAsin = null, pollT = null, interval = "6";
+let source = "web", products = [], status = {}, filter = "all", lastAlert = null, openAsin = null, pollT = null, interval = "6";
 
 function fmt(v, cur) {
   if (v == null) return "—";
@@ -396,6 +401,7 @@ function render() {
   const last = status.last_check || products.map(p => p.checked_at).filter(Boolean).sort().at(-1);
   $("#sLast").textContent = last ? ago(last) : "—";
   $("#sNext").textContent = status.next_check ? "próxima " + until(status.next_check) : "";
+  $("#srcTxt").textContent = source === "keepa" ? "Keepa" : "Amazon";
   $("#nextTxt").textContent = status.checking ? "comprobando precios…" : status.next_check ? "próxima ronda " + until(status.next_check) : "en marcha";
 
   // ticker
@@ -419,7 +425,7 @@ function render() {
 async function refresh() {
   try {
     const s = await api("/api/state" + (lastAlert != null ? "?since=" + lastAlert : ""));
-    products = s.products; status = s.status;
+    products = s.products; status = s.status; source = s.source;
     if (lastAlert == null) lastAlert = s.alerts.length ? s.alerts[0].id : 0;
     else if (s.alerts.length) {
       lastAlert = s.alerts[0].id;
@@ -569,6 +575,7 @@ $("#settingsBtn").addEventListener("click", async () => {
   interval = s.interval_hours;
   document.querySelectorAll("#intervalSeg button").forEach(b => b.classList.toggle("on", b.dataset.h === String(parseInt(interval))));
   $("#tgToken").value = s.telegram_token; $("#tgChat").value = s.telegram_chat_id;
+  $("#kpKey").value = s.keepa_key || ""; $("#kpInfo").textContent = "";
   $("#settings").classList.add("on"); $("#scrim").classList.add("on");
 });
 $("#intervalSeg").addEventListener("click", e => {
@@ -580,8 +587,15 @@ $("#tgTest").addEventListener("click", async () => {
   try { await api("/api/settings/test", {method: "POST", body: {telegram_token: $("#tgToken").value, telegram_chat_id: $("#tgChat").value}}); toast("¡Mensaje enviado!", "Mira tu Telegram.", "win"); }
   catch (err) { toast("Telegram no responde", err.message, "bad"); }
 });
+$("#kpTest").addEventListener("click", async () => {
+  $("#kpInfo").textContent = "Comprobando…";
+  try {
+    const t = await api("/api/settings/test-keepa", {method: "POST", body: {keepa_key: $("#kpKey").value}});
+    $("#kpInfo").textContent = `✓ Clave válida · ${t.tokens_left} tokens disponibles (+${t.refill_rate}/min)`;
+  } catch (err) { $("#kpInfo").textContent = ""; toast("Keepa no acepta la clave", err.message, "bad"); }
+});
 $("#saveSettings").addEventListener("click", async () => {
-  await api("/api/settings", {method: "POST", body: {interval_hours: interval, telegram_token: $("#tgToken").value, telegram_chat_id: $("#tgChat").value}});
+  await api("/api/settings", {method: "POST", body: {interval_hours: interval, telegram_token: $("#tgToken").value, telegram_chat_id: $("#tgChat").value, keepa_key: $("#kpKey").value}});
   closeAll(); toast("Ajustes guardados", `Comprobaremos los precios cada ${interval} h.`); setTimeout(refresh, 300);
 });
 
